@@ -8,7 +8,7 @@ by buffering points and executing non-blocking asynchronous batch flushes.
 import asyncio
 import logging
 import time
-from typing import List, Optional
+from typing import List, Optional, Any
 from backend.src.config import settings
 from backend.src.unpacker import RTCarInfo
 
@@ -122,9 +122,21 @@ class InfluxTelemetryWriter:
         """Continuous consumer loop buffering telemetry points."""
         while self.is_running:
             try:
+                # Drain incoming items from queue into buffer
+                if self.queue:
+                    while not self.queue.empty():
+                        try:
+                            telemetry: RTCarInfo = self.queue.get_nowait()
+                            p = self.record_to_point(telemetry)
+                            if p:
+                                self.buffer.append(p)
+                            self.queue.task_done()
+                        except asyncio.QueueEmpty:
+                            break
+
                 now = time.time()
                 # If buffer size exceeded or flush interval reached, flush
-                if len(self.buffer) >= self.batch_size or (now - self.last_flush) >= self.flush_interval:
+                if len(self.buffer) >= self.batch_size or (self.buffer and (now - self.last_flush) >= self.flush_interval):
                     await self._flush_buffer()
 
                 await asyncio.sleep(0.05)

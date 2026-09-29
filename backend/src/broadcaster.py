@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Set
+from typing import Set, Optional
 from fastapi import WebSocket
 from backend.src.unpacker import RTCarInfo
 

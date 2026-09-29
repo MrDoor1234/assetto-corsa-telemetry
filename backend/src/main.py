@@ -35,6 +35,7 @@ logger = logging.getLogger("telemetry.main")
 
 # Global pipeline singletons
 telemetry_queue: asyncio.Queue = None
+db_queue: asyncio.Queue = None
 listener: TelemetryListener = None
 broadcaster: TelemetryBroadcaster = None
 db_writer: InfluxTelemetryWriter = None
@@ -43,17 +44,18 @@ start_time = 0.0
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global telemetry_queue, listener, broadcaster, db_writer, start_time
+    global telemetry_queue, db_queue, listener, broadcaster, db_writer, start_time
     start_time = time.time()
     logger.info("Initializing Assetto Corsa Telemetry Pipeline...")
 
-    # 1. Initialize Decoupled In-Memory Buffer
+    # 1. Initialize Decoupled In-Memory Buffers
     telemetry_queue = asyncio.Queue(maxsize=settings.queue_maxsize)
+    db_queue = asyncio.Queue(maxsize=settings.queue_maxsize)
 
     # 2. Initialize Components
-    listener = TelemetryListener(telemetry_queue)
+    listener = TelemetryListener(telemetry_queue, db_queue=db_queue)
     broadcaster = TelemetryBroadcaster(telemetry_queue, broadcast_rate_hz=settings.broadcast_rate_hz)
-    db_writer = InfluxTelemetryWriter(telemetry_queue, batch_size=settings.influx_batch_size)
+    db_writer = InfluxTelemetryWriter(db_queue, batch_size=settings.influx_batch_size)
 
     # 3. Start Asynchronous Pipeline Workers
     await listener.start()

@@ -25,8 +25,9 @@ logger = logging.getLogger("telemetry.listener")
 
 
 class TelemetryListenerProtocol(asyncio.DatagramProtocol):
-    def __init__(self, queue: asyncio.Queue, metrics: dict):
+    def __init__(self, queue: asyncio.Queue, metrics: dict, db_queue: Optional[asyncio.Queue] = None):
         self.queue = queue
+        self.db_queue = db_queue
         self.metrics = metrics
         self.transport: Optional[asyncio.DatagramTransport] = None
 
@@ -47,7 +48,7 @@ class TelemetryListenerProtocol(asyncio.DatagramProtocol):
             telemetry: RTCarInfo = unpack_rt_car_info(data)
             self.metrics["packets_decoded"] += 1
 
-            # High-throughput non-blocking queue push:
+            # High-throughput non-blocking queue push for broadcaster:
             # If the consumer is busy, drop oldest to ensure zero visualization lag
             if self.queue.full():
                 try:
@@ -56,6 +57,15 @@ class TelemetryListenerProtocol(asyncio.DatagramProtocol):
                 except asyncio.QueueEmpty:
                     pass
             self.queue.put_nowait(telemetry)
+
+            # Also push to database batch queue if configured
+            if self.db_queue:
+                if self.db_queue.full():
+                    try:
+                        self.db_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                self.db_queue.put_nowait(telemetry)
 
         except Exception as e:
             self.metrics["decode_errors"] += 1
@@ -69,8 +79,9 @@ class TelemetryListenerProtocol(asyncio.DatagramProtocol):
 
 
 class TelemetryListener:
-    def __init__(self, queue: asyncio.Queue):
+    def __init__(self, queue: asyncio.Queue, db_queue: Optional[asyncio.Queue] = None):
         self.queue = queue
+        self.db_queue = db_queue
         self.is_running = False
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.protocol: Optional[TelemetryListenerProtocol] = None
@@ -94,7 +105,7 @@ class TelemetryListener:
 
         # Bind to ephemeral local port for receiving replies from AC
         self.transport, self.protocol = await loop.create_datagram_endpoint(
-            lambda: TelemetryListenerProtocol(self.queue, self.metrics),
+            lambda: TelemetryListenerProtocol(self.queue, self.metrics, db_queue=self.db_queue),
             local_addr=("0.0.0.0", 0),
         )
         logger.info(f"Telemetry listener started. Target AC server: {settings.ac_host}:{settings.ac_port}")

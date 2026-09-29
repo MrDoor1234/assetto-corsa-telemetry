@@ -23,8 +23,9 @@ flowchart LR
     subgraph Ingestion_Hub ["Python Async Ingestion Core"]
         UDP["Async UDP Client (Handshake & Keepalive)"]
         Unpack["Struct Decoder (RTCarInfo - 328 Bytes)"]
-        Queue["asyncio.Queue (Decoupled Memory Buffer)"]
-        WS_Broadcaster["WebSocket Fanout Broadcaster"]
+        WS_Queue["asyncio.Queue (Broadcaster Drop-Oldest)"]
+        DB_Queue["asyncio.Queue (DB Influx Buffer)"]
+        WS_Broadcaster["WebSocket Fanout Broadcaster (60 Hz)"]
         DB_Worker["Batch Asynchronous InfluxDB Writer"]
     end
 
@@ -33,20 +34,23 @@ flowchart LR
     end
 
     subgraph Visualization ["Race Engineer Cockpit"]
-        UI["React 18 + TypeScript"]
-        Canvas["HTML5 Canvas Rolling Waveforms (60 FPS)"]
+        UI["React 18 + TypeScript + Tailwind CSS"]
+        Canvas["Multi-Channel Rolling Waveforms (60 FPS)"]
+        GG["2D G-G Friction Circle (Traction Ellipse)"]
         Dash["Shift LED Tachometer & Pedal Traces"]
     end
 
     AC -- "UDP Datagrams" --> UDP
     Simulator -. "UDP Datagrams" .-> UDP
     UDP --> Unpack
-    Unpack --> Queue
-    Queue --> WS_Broadcaster
-    Queue --> DB_Worker
+    Unpack --> WS_Queue
+    Unpack --> DB_Queue
+    WS_Queue --> WS_Broadcaster
+    DB_Queue --> DB_Worker
     DB_Worker -- "Async Batch Flush" --> Influx
     WS_Broadcaster -- "ws://localhost:8000/ws/telemetry" --> UI
     UI --> Canvas
+    UI --> GG
     UI --> Dash
 ```
 
@@ -57,14 +61,21 @@ flowchart LR
 ### 1. Stateful Two-Way UDP Handshake vs. Broadcast
 Unlike generic racing games that blindly broadcast UDP packets across the local subnet, **Assetto Corsa requires a two-way client handshake**. The Python backend acts as an active client, packing a 12-byte struct (`struct.pack('<3i', 1, 1, 1)`) to subscribe to the update feed on port `9996`. This mirrors real-world telemetry interfaces (such as McLaren Applied or Bosch motorsport loggers) where trackside systems negotiate sessions with the vehicle's telemetry control unit.
 
-### 2. Zero-Lag Decoupled Queue (`asyncio.Queue`)
+### 2. Dual Zero-Lag Decoupled Queues (`asyncio.Queue`)
 Writing high-frequency telemetry (60 packets/second) directly into a database synchronously would block the socket listener during disk I/O spikes or network jitter. 
-* **The Solution:** The UDP listener immediately unpacks packets and enqueues them into an in-memory `asyncio.Queue`.
-* **Drop-Oldest Strategy:** If consumer tasks (WebSocket broadcasting or database flushing) fall behind, the oldest item is discarded rather than allowing latency to accumulate. This guarantees that trackside visualization reflects instantaneous car physics with sub-millisecond overhead.
+* **The Solution:** The UDP listener immediately unpacks packets and fans them out into dedicated in-memory queues: one for the WebSocket broadcaster and one for the database batch worker.
+* **Drop-Oldest Strategy:** If consumer tasks fall behind, the oldest item is discarded rather than allowing latency to accumulate. This guarantees that trackside visualization reflects instantaneous car physics with sub-millisecond overhead.
 
-### 3. Canvas-Based Rolling Traces vs. Virtual DOM Rendering
+### 3. Circular Ring Buffer & Multi-Channel Canvas Waveforms
 Standard charting libraries (e.g. naive SVG re-renders) struggle to render continuous 60 Hz waveforms without causing garbage collection pauses and browser tab freezing.
-* **The Solution:** The telemetry waveform is rendered directly to an **HTML5 Canvas** via a `requestAnimationFrame` loop, reading from a rolling ring buffer of data points. This decouples visualization rendering from React component lifecycles.
+* **The Solution:** The telemetry waveform is rendered directly to an **HTML5 Canvas** via a `requestAnimationFrame` loop, reading from a pre-allocated **circular ring buffer** ($O(1)$ zero-allocation writes).
+* **Multi-Channel Toggles:** Interactive channel selectors allow toggling Speed, Throttle, Brake, Steering Angle, Engine RPM, and Lateral G-Force traces independently.
+
+### 4. 2D G-G Friction Circle (Traction Ellipse)
+Replicates professional race engineering telemetry (MoTeC i2 Pro / McLaren ATLAS) by plotting real-time lateral sway and longitudinal surge G-forces with concentric G-rings, dynamic traction boundaries, trailing decay lines, and peak load memory.
+
+### 5. Built-in Client-Side Demo Simulator
+The dashboard features an integrated offline simulation engine (`DEMO MODE`), allowing anyone exploring the portfolio to interact with live 60 Hz shifting, cornering, and telemetry dynamics without needing Python or Assetto Corsa running.
 
 ---
 
@@ -88,12 +99,16 @@ assetto-corsa-telemetry/
 │   └── Dockerfile
 ├── frontend/
 │   ├── src/
-│   │   ├── components/         # Tachometer, Pedals, Chassis, and Canvas Chart
-│   │   ├── hooks/              # useTelemetrySocket (auto-reconnect + Hz counter)
+│   │   ├── components/         # Tachometer, Pedals, Chassis, FrictionCircle, Canvas Chart
+│   │   ├── hooks/              # useTelemetrySocket (auto-reconnect, demo mode, 1Hz throttled stats)
 │   │   ├── types/              # Strongly-typed telemetry frames
-│   │   ├── App.tsx             # Master race engineer dashboard
-│   │   └── main.tsx
+│   │   ├── __tests__/          # Vitest suite for telemetry math & unit conversions
+│   │   ├── App.tsx             # Master race engineer dashboard with units & redline controls
+│   │   ├── main.tsx
+│   │   └── index.css           # Tailwind CSS + custom motorsport theme
 │   ├── package.json
+│   ├── tailwind.config.js      # Tailwind CSS configuration
+│   ├── postcss.config.js       # PostCSS plugins
 │   ├── vite.config.ts
 │   └── Dockerfile
 ├── infrastructure/
@@ -103,6 +118,7 @@ assetto-corsa-telemetry/
 ├── .github/
 │   └── workflows/
 │       └── ci.yml               # Automated Pytest CI/CD workflow
+├── pytest.ini                   # Pytest path and runner configuration
 ├── .gitignore
 └── README.md
 ```
@@ -124,7 +140,7 @@ docker compose -f infrastructure/docker-compose.yml up --build
 
 ### Option B: Local Development (Without Running Assetto Corsa)
 
-You do not need to have Assetto Corsa installed or running to develop and test this project. Use the built-in 60 Hz physics simulator:
+You do not need to have Assetto Corsa installed or running to develop and test this project. Use the built-in 60 Hz physics simulator or the frontend Demo Mode:
 
 #### 1. Start the Physics Simulator (Terminal 1)
 ```bash
@@ -144,17 +160,16 @@ cd frontend
 npm install
 npm run dev
 ```
-Open [http://localhost:5173](http://localhost:5173) to see the live telemetry stream updating at 60 Hz.
+Open [http://localhost:5173](http://localhost:5173) to see the live telemetry stream updating at 60 Hz. Click **⚡ DEMO MODE** anytime for offline demonstration.
 
 ---
 
 ## Testing & Verification
 
-Run the automated test suite:
+### Backend Automated Test Suite
 ```bash
 pytest backend/tests/ -v
 ```
-
 Output:
 ```text
 backend/tests/test_pipeline_integration.py::test_end_to_end_udp_ingestion PASSED
@@ -164,7 +179,19 @@ backend/tests/test_unpacker.py::test_gear_translation PASSED
 backend/tests/test_unpacker.py::test_unpack_rt_car_info_accuracy PASSED
 backend/tests/test_unpacker.py::test_truncated_packet_error PASSED
 
-============================== 6 passed in 0.53s ==============================
+============================== 6 passed in 0.50s ==============================
+```
+
+### Frontend Automated Unit Tests
+```bash
+cd frontend
+npm test
+```
+Output:
+```text
+ ✓ src/__tests__/telemetry.test.ts (7 tests)
+ Test Files  1 passed (1)
+      Tests  7 passed (7)
 ```
 
 ---

@@ -1,141 +1,347 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { TelemetryFrame } from '../types/telemetry';
 
 interface TelemetryChartProps {
   telemetry: TelemetryFrame | null;
+  unit?: 'kmh' | 'mph';
 }
 
 interface DataPoint {
   speed: number;
   throttle: number;
   brake: number;
+  steer: number;
+  rpm: number;
+  sway: number;
 }
 
-export const TelemetryChart: React.FC<TelemetryChartProps> = ({ telemetry }) => {
+export const TelemetryChart: React.FC<TelemetryChartProps> = React.memo(({ telemetry, unit = 'kmh' }) => {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const historyRef = useRef<DataPoint[]>([]);
-  const maxPoints = 250; // Rolling window of ~4-5 seconds at 60Hz
+
+  // Channel toggles
+  const [activeChannels, setActiveChannels] = useState({
+    speed: true,
+    throttle: true,
+    brake: true,
+    steer: false,
+    rpm: false,
+    sway: false,
+  });
+
+  const channelsRef = useRef(activeChannels);
+  channelsRef.current = activeChannels;
+
+  // Circular Ring Buffer for O(1) zero-allocation performance
+  const capacity = 300;
+  const bufferRef = useRef<DataPoint[]>([]);
+  const headRef = useRef<number>(0);
+  const countRef = useRef<number>(0);
+
+  // Initialize fixed buffer
+  if (bufferRef.current.length === 0) {
+    bufferRef.current = new Array(capacity).fill(null).map(() => ({
+      speed: 0,
+      throttle: 0,
+      brake: 0,
+      steer: 0,
+      rpm: 0,
+      sway: 0,
+    }));
+  }
 
   useEffect(() => {
     if (telemetry) {
-      historyRef.current.push({
-        speed: telemetry.speed_kmh,
+      const idx = headRef.current;
+      const speedVal = unit === 'mph' ? telemetry.speed_mph : telemetry.speed_kmh;
+      bufferRef.current[idx] = {
+        speed: speedVal,
         throttle: telemetry.throttle,
         brake: telemetry.brake,
-      });
-      if (historyRef.current.length > maxPoints) {
-        historyRef.current.shift();
+        steer: telemetry.steer,
+        rpm: telemetry.engine_rpm,
+        sway: telemetry.sway,
+      };
+      headRef.current = (idx + 1) % capacity;
+      if (countRef.current < capacity) {
+        countRef.current += 1;
       }
     }
-  }, [telemetry]);
+  }, [telemetry, unit]);
 
   useEffect(() => {
     let animId: number;
 
     const render = () => {
       const canvas = canvasRef.current;
-      if (!canvas) return;
+      const container = containerRef.current;
+      if (!canvas || !container) return;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      const width = canvas.width;
-      const height = canvas.height;
+      const dpr = window.devicePixelRatio || 1;
+      const rect = container.getBoundingClientRect();
+
+      // Handle HiDPI resize dynamically
+      if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+      }
+
+      const width = rect.width;
+      const height = rect.height;
+
+      ctx.save();
+      ctx.scale(dpr, dpr);
 
       // Clear background
       ctx.fillStyle = '#080a0e';
       ctx.fillRect(0, 0, width, height);
 
-      // Draw subtle grid lines
+      // Subtle horizontal grid lines & scale labels
       ctx.strokeStyle = '#1e293b';
       ctx.lineWidth = 1;
-      for (let y = 0; y <= height; y += height / 4) {
+      ctx.font = '9px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#475569';
+
+      for (let p = 0.25; p <= 1; p += 0.25) {
+        const y = height - p * (height * 0.85);
         ctx.beginPath();
-        ctx.moveTo(0, y);
+        ctx.moveTo(35, y);
         ctx.lineTo(width, y);
         ctx.stroke();
+
+        ctx.textAlign = 'right';
+        ctx.fillText(`${Math.round(p * 100)}%`, 30, y + 3);
       }
 
-      const points = historyRef.current;
-      if (points.length < 2) {
+      const count = countRef.current;
+      if (count < 2) {
+        ctx.restore();
         animId = requestAnimationFrame(render);
         return;
       }
 
-      const dx = width / (maxPoints - 1);
-      const startX = width - (points.length - 1) * dx;
+      const dx = (width - 40) / (capacity - 1);
+      const startX = 35 + (capacity - count) * dx;
+      const buffer = bufferRef.current;
+      const head = headRef.current;
+      const startIdx = (head - count + capacity) % capacity;
 
-      // 1. Draw Brake Trace (Red Area)
-      ctx.fillStyle = 'rgba(239, 68, 68, 0.25)';
-      ctx.strokeStyle = '#ef4444';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(startX, height);
-      for (let i = 0; i < points.length; i++) {
-        const x = startX + i * dx;
-        const y = height - points[i].brake * (height * 0.85);
-        ctx.lineTo(x, y);
+      const channels = channelsRef.current;
+
+      // Helper to read circular buffer in chronological order
+      const getPoint = (i: number): DataPoint => {
+        return buffer[(startIdx + i) % capacity];
+      };
+
+      // 1. Draw Brake Trace (Red Area & Line)
+      if (channels.brake) {
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(startX, height);
+        for (let i = 0; i < count; i++) {
+          const pt = getPoint(i);
+          const x = startX + i * dx;
+          const y = height - pt.brake * (height * 0.85);
+          ctx.lineTo(x, y);
+        }
+        ctx.lineTo(startX + (count - 1) * dx, height);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.beginPath();
+        for (let i = 0; i < count; i++) {
+          const pt = getPoint(i);
+          const x = startX + i * dx;
+          const y = height - pt.brake * (height * 0.85);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
       }
-      ctx.lineTo(startX + (points.length - 1) * dx, height);
-      ctx.closePath();
-      ctx.fill();
 
       // 2. Draw Throttle Trace (Green Line)
-      ctx.strokeStyle = '#10b981';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      for (let i = 0; i < points.length; i++) {
-        const x = startX + i * dx;
-        const y = height - points[i].throttle * (height * 0.85);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+      if (channels.throttle) {
+        ctx.strokeStyle = '#10b981';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < count; i++) {
+          const pt = getPoint(i);
+          const x = startX + i * dx;
+          const y = height - pt.throttle * (height * 0.85);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
 
-      // 3. Draw Speed Trace (Cyan Line, 0-350 km/h)
-      ctx.strokeStyle = '#00f2fe';
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      for (let i = 0; i < points.length; i++) {
-        const x = startX + i * dx;
-        const normSpeed = Math.min(1.0, points[i].speed / 350.0);
-        const y = height - normSpeed * (height * 0.9);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+      // 3. Draw Steering Trace (Yellow Line, normalized -1 to +1 centered at 50%)
+      if (channels.steer) {
+        ctx.strokeStyle = '#eab308';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let i = 0; i < count; i++) {
+          const pt = getPoint(i);
+          const x = startX + i * dx;
+          const y = height / 2 - pt.steer * (height * 0.4);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
 
+      // 4. Draw Sway / Lateral G (Purple Line, -4G to +4G centered at 50%)
+      if (channels.sway) {
+        ctx.strokeStyle = '#a855f7';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let i = 0; i < count; i++) {
+          const pt = getPoint(i);
+          const x = startX + i * dx;
+          const y = height / 2 - (pt.sway / 4.0) * (height * 0.4);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      // 5. Draw RPM Trace (Amber Line, 0-15000 RPM)
+      if (channels.rpm) {
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let i = 0; i < count; i++) {
+          const pt = getPoint(i);
+          const x = startX + i * dx;
+          const normRpm = Math.min(1.0, pt.rpm / 15000.0);
+          const y = height - normRpm * (height * 0.85);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      // 6. Draw Speed Trace (Cyan Line, max 350 km/h or 220 mph)
+      if (channels.speed) {
+        const maxSpeed = unit === 'mph' ? 220.0 : 350.0;
+        ctx.strokeStyle = '#00f2fe';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        for (let i = 0; i < count; i++) {
+          const pt = getPoint(i);
+          const x = startX + i * dx;
+          const normSpeed = Math.min(1.0, pt.speed / maxSpeed);
+          const y = height - normSpeed * (height * 0.88);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      ctx.restore();
       animId = requestAnimationFrame(render);
     };
 
     animId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animId);
-  }, []);
+  }, [unit]);
+
+  const toggleChannel = (key: keyof typeof activeChannels) => {
+    setActiveChannels((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   return (
     <div className="card">
-      <div className="flex justify-between items-center mb-2">
-        <div className="card-header m-0">LIVE ROLLING TELEMETRY WAVEFORM (60 HZ)</div>
-        <div className="flex gap-4 text-xs font-mono">
-          <span className="flex items-center gap-1.5 text-cyan-400">
-            <span className="w-2.5 h-0.5 bg-cyan-400 rounded-full inline-block" /> SPEED (350 KM/H MAX)
-          </span>
-          <span className="flex items-center gap-1.5 text-emerald-400">
-            <span className="w-2.5 h-0.5 bg-emerald-400 rounded-full inline-block" /> THROTTLE
-          </span>
-          <span className="flex items-center gap-1.5 text-red-400">
-            <span className="w-2.5 h-0.5 bg-red-400 rounded-full inline-block" /> BRAKE
-          </span>
+      <div className="flex flex-wrap justify-between items-center gap-2 mb-2">
+        <div className="card-header m-0">LIVE TELEMETRY WAVEFORM (60 HZ)</div>
+
+        {/* Interactive Channel Toggles */}
+        <div className="flex flex-wrap gap-2 text-xs font-mono">
+          <button
+            onClick={() => toggleChannel('speed')}
+            className={`px-2 py-0.5 rounded border transition-colors flex items-center gap-1.5 ${
+              activeChannels.speed
+                ? 'bg-cyan-950/60 border-cyan-500/80 text-cyan-300'
+                : 'bg-slate-900 border-slate-800 text-slate-500'
+            }`}
+          >
+            <span className="w-2 h-2 rounded-full bg-cyan-400 inline-block" />
+            SPEED
+          </button>
+
+          <button
+            onClick={() => toggleChannel('throttle')}
+            className={`px-2 py-0.5 rounded border transition-colors flex items-center gap-1.5 ${
+              activeChannels.throttle
+                ? 'bg-emerald-950/60 border-emerald-500/80 text-emerald-300'
+                : 'bg-slate-900 border-slate-800 text-slate-500'
+            }`}
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />
+            THROTTLE
+          </button>
+
+          <button
+            onClick={() => toggleChannel('brake')}
+            className={`px-2 py-0.5 rounded border transition-colors flex items-center gap-1.5 ${
+              activeChannels.brake
+                ? 'bg-red-950/60 border-red-500/80 text-red-300'
+                : 'bg-slate-900 border-slate-800 text-slate-500'
+            }`}
+          >
+            <span className="w-2 h-2 rounded-full bg-red-400 inline-block" />
+            BRAKE
+          </button>
+
+          <button
+            onClick={() => toggleChannel('steer')}
+            className={`px-2 py-0.5 rounded border transition-colors flex items-center gap-1.5 ${
+              activeChannels.steer
+                ? 'bg-yellow-950/60 border-yellow-500/80 text-yellow-300'
+                : 'bg-slate-900 border-slate-800 text-slate-500'
+            }`}
+          >
+            <span className="w-2 h-2 rounded-full bg-yellow-400 inline-block" />
+            STEERING
+          </button>
+
+          <button
+            onClick={() => toggleChannel('rpm')}
+            className={`px-2 py-0.5 rounded border transition-colors flex items-center gap-1.5 ${
+              activeChannels.rpm
+                ? 'bg-amber-950/60 border-amber-500/80 text-amber-300'
+                : 'bg-slate-900 border-slate-800 text-slate-500'
+            }`}
+          >
+            <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
+            RPM
+          </button>
+
+          <button
+            onClick={() => toggleChannel('sway')}
+            className={`px-2 py-0.5 rounded border transition-colors flex items-center gap-1.5 ${
+              activeChannels.sway
+                ? 'bg-purple-950/60 border-purple-500/80 text-purple-300'
+                : 'bg-slate-900 border-slate-800 text-slate-500'
+            }`}
+          >
+            <span className="w-2 h-2 rounded-full bg-purple-400 inline-block" />
+            LATERAL G
+          </button>
         </div>
       </div>
 
-      <div className="relative w-full h-44 rounded-lg overflow-hidden border border-slate-800">
+      <div ref={containerRef} className="relative w-full h-44 rounded-lg overflow-hidden border border-slate-800">
         <canvas
           ref={canvasRef}
-          width={1000}
-          height={200}
           className="w-full h-full block"
         />
       </div>
     </div>
   );
-};
+});
+
+TelemetryChart.displayName = 'TelemetryChart';
