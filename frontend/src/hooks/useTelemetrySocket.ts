@@ -11,8 +11,22 @@ export interface UseTelemetrySocketReturn {
   reconnect: () => void;
 }
 
+const getDefaultWsUrl = (): string => {
+  if (typeof window !== 'undefined') {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.hostname || 'localhost';
+    // When served via Nginx in Docker (e.g. port 3000 or 80), proxy through Nginx
+    if (window.location.port === '3000' || window.location.port === '80' || !window.location.port) {
+      return `${proto}//${window.location.host}/ws/telemetry`;
+    }
+    // In Vite local development (port 5173), direct connect to backend on port 8000
+    return `${proto}//${host}:8000/ws/telemetry`;
+  }
+  return 'ws://localhost:8000/ws/telemetry';
+};
+
 export function useTelemetrySocket(
-  url: string = 'ws://localhost:8000/ws/telemetry'
+  url: string = getDefaultWsUrl()
 ): UseTelemetrySocketReturn {
   const [telemetry, setTelemetry] = useState<TelemetryFrame | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
