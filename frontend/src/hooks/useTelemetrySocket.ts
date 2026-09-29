@@ -4,6 +4,7 @@ import { TelemetryFrame } from '../types/telemetry';
 export interface UseTelemetrySocketReturn {
   telemetry: TelemetryFrame | null;
   isConnected: boolean;
+  isStreaming: boolean;
   fps: number;
   totalPackets: number;
   isDemoMode: boolean;
@@ -30,6 +31,7 @@ export function useTelemetrySocket(
 ): UseTelemetrySocketReturn {
   const [telemetry, setTelemetry] = useState<TelemetryFrame | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [fps, setFps] = useState<number>(0);
   const [totalPackets, setTotalPackets] = useState<number>(0);
   const [isDemoMode, setDemoMode] = useState<boolean>(false);
@@ -38,6 +40,7 @@ export function useTelemetrySocket(
   const frameCountRef = useRef<number>(0);
   const totalPacketsRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(performance.now());
+  const lastPacketTimeRef = useRef<number>(0);
   const reconnectTimeoutRef = useRef<number | undefined>(undefined);
   const manualConnectTrigger = useRef<number>(0);
 
@@ -217,11 +220,40 @@ export function useTelemetrySocket(
     };
 
     setIsConnected(true);
+    setIsStreaming(true);
     animId = requestAnimationFrame(tick);
 
     return () => {
       cancelAnimationFrame(animId);
     };
+  }, [isDemoMode]);
+
+  // Periodic liveness watchdog: resets fps to 0 and isStreaming to false if no packets arrive
+  useEffect(() => {
+    if (isDemoMode) return;
+
+    const watchdog = setInterval(() => {
+      const now = performance.now();
+      const elapsedSincePacket = now - lastPacketTimeRef.current;
+
+      // If no packet received in the last 1.5 seconds, car is off track or paused
+      if (lastPacketTimeRef.current === 0 || elapsedSincePacket > 1500) {
+        setFps(0);
+        setIsStreaming(false);
+        frameCountRef.current = 0;
+      } else {
+        const elapsed = now - lastTimeRef.current;
+        if (elapsed > 0 && frameCountRef.current > 0) {
+          setFps(Math.round((frameCountRef.current * 1000) / elapsed));
+          setTotalPackets(totalPacketsRef.current);
+          frameCountRef.current = 0;
+          lastTimeRef.current = now;
+          setIsStreaming(true);
+        }
+      }
+    }, 1000);
+
+    return () => clearInterval(watchdog);
   }, [isDemoMode]);
 
   // Real WebSocket Connection
@@ -241,24 +273,17 @@ export function useTelemetrySocket(
 
         ws.onopen = () => {
           setIsConnected(true);
+          // Note: isStreaming remains false until packets are actively received
         };
 
         ws.onmessage = (event) => {
           try {
             const data: TelemetryFrame = JSON.parse(event.data);
             setTelemetry(data);
+            lastPacketTimeRef.current = performance.now();
             frameCountRef.current += 1;
             totalPacketsRef.current += 1;
-
-            // Decouple packet counter re-renders: only update state every second alongside FPS
-            const now = performance.now();
-            const elapsed = now - lastTimeRef.current;
-            if (elapsed >= 1000) {
-              setFps(Math.round((frameCountRef.current * 1000) / elapsed));
-              setTotalPackets(totalPacketsRef.current);
-              frameCountRef.current = 0;
-              lastTimeRef.current = now;
-            }
+            setIsStreaming(true);
           } catch (err) {
             console.error('Failed to parse telemetry frame:', err);
           }
@@ -266,16 +291,23 @@ export function useTelemetrySocket(
 
         ws.onclose = () => {
           setIsConnected(false);
+          setIsStreaming(false);
           setFps(0);
           reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
         };
 
         ws.onerror = (error) => {
           console.debug('WebSocket encounter:', error);
+          setIsConnected(false);
+          setIsStreaming(false);
+          setFps(0);
           ws.close();
         };
       } catch (err) {
         console.error('Failed to initialize WebSocket:', err);
+        setIsConnected(false);
+        setIsStreaming(false);
+        setFps(0);
         reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
       }
     }
@@ -294,6 +326,7 @@ export function useTelemetrySocket(
   return {
     telemetry,
     isConnected,
+    isStreaming,
     fps,
     totalPackets,
     isDemoMode,

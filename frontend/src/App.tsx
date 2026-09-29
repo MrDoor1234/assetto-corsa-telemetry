@@ -5,12 +5,25 @@ import { PedalsTrace } from './components/PedalsTrace';
 import { TireMonitor } from './components/TireMonitor';
 import { FrictionCircle } from './components/FrictionCircle';
 import { TelemetryChart } from './components/TelemetryChart';
-import { Activity, Radio, Gauge, Clock, Zap, RotateCw, Settings } from 'lucide-react';
+import {
+  Activity,
+  Radio,
+  Gauge,
+  Clock,
+  Zap,
+  RotateCw,
+  Settings,
+  Database,
+  ExternalLink,
+  X,
+  Key,
+} from 'lucide-react';
 
 export const App: React.FC = () => {
   const {
     telemetry,
     isConnected,
+    isStreaming,
     fps,
     totalPackets,
     isDemoMode,
@@ -20,6 +33,7 @@ export const App: React.FC = () => {
 
   const [unit, setUnit] = useState<'kmh' | 'mph'>('kmh');
   const [maxRpm, setMaxRpm] = useState<number>(13500);
+  const [showInfluxModal, setShowInfluxModal] = useState<boolean>(false);
 
   const formatLapTime = (ms: number) => {
     if (!ms || ms <= 0) return '--:--.---';
@@ -43,7 +57,7 @@ export const App: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen p-4 sm:p-6 max-w-7xl mx-auto flex flex-col gap-6">
+    <div className="min-h-screen p-4 sm:p-6 max-w-7xl mx-auto flex flex-col gap-6 relative">
       {/* Paddock Telemetry Header */}
       <header className="flex flex-wrap justify-between items-center bg-slate-900/90 border border-slate-800 p-4 rounded-xl backdrop-blur-md gap-4 shadow-xl">
         <div className="flex items-center gap-3">
@@ -61,7 +75,7 @@ export const App: React.FC = () => {
         </div>
 
         {/* Live Controls & Diagnostics Bar */}
-        <div className="flex flex-wrap items-center gap-3 sm:gap-5 font-mono text-xs">
+        <div className="flex flex-wrap items-center gap-3 sm:gap-4 font-mono text-xs">
           {/* Demo Mode Toggle */}
           <button
             onClick={() => setDemoMode((prev) => !prev)}
@@ -101,7 +115,7 @@ export const App: React.FC = () => {
           </div>
 
           {/* RPM Redline Presets */}
-          <div className="hidden md:flex items-center gap-1 bg-slate-800/80 border border-slate-700 rounded-lg px-2 py-1 text-slate-400">
+          <div className="hidden lg:flex items-center gap-1 bg-slate-800/80 border border-slate-700 rounded-lg px-2 py-1 text-slate-400">
             <Settings className="w-3.5 h-3.5 text-slate-400" />
             <span className="text-[10px] text-slate-500">REDLINE:</span>
             <select
@@ -117,31 +131,47 @@ export const App: React.FC = () => {
             </select>
           </div>
 
-          {/* Connection status */}
-          <div className="flex items-center gap-2">
+          {/* InfluxDB Credentials Popover Button */}
+          <button
+            onClick={() => setShowInfluxModal(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 rounded-lg text-slate-300 transition-colors"
+            title="View InfluxDB Login & Connection Details"
+          >
+            <Database className="w-3.5 h-3.5 text-purple-400" />
+            <span className="hidden sm:inline font-bold">INFLUXDB</span>
+          </button>
+
+          {/* Connection status badge */}
+          <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-slate-950/60 border border-slate-800">
             <Radio
-              className={`w-4 h-4 ${
-                isConnected
-                  ? isDemoMode
-                    ? 'text-amber-400 animate-pulse'
-                    : 'text-emerald-400 animate-pulse'
-                  : 'text-red-400'
+              className={`w-3.5 h-3.5 ${
+                !isConnected
+                  ? 'text-red-400'
+                  : isDemoMode
+                  ? 'text-amber-400 animate-pulse'
+                  : isStreaming
+                  ? 'text-emerald-400 animate-pulse'
+                  : 'text-cyan-400'
               }`}
             />
             <span
-              className={
-                isConnected
-                  ? isDemoMode
-                    ? 'text-amber-400 font-bold'
-                    : 'text-emerald-400 font-bold'
-                  : 'text-red-400'
-              }
+              className={`font-bold ${
+                !isConnected
+                  ? 'text-red-400'
+                  : isDemoMode
+                  ? 'text-amber-400'
+                  : isStreaming
+                  ? 'text-emerald-400'
+                  : 'text-cyan-400'
+              }`}
             >
-              {isConnected
-                ? isDemoMode
-                  ? `SIMULATING (${fps} HZ)`
-                  : `STREAMING (${fps} HZ)`
-                : 'FEED OFFLINE'}
+              {!isConnected
+                ? 'FEED OFFLINE'
+                : isDemoMode
+                ? `SIMULATING (${fps} HZ)`
+                : isStreaming
+                ? `STREAMING (${fps} HZ)`
+                : 'STANDBY (WAITING FOR CAR)'}
             </span>
             {!isConnected && !isDemoMode && (
               <button
@@ -149,13 +179,13 @@ export const App: React.FC = () => {
                 className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors"
                 title="Retry WebSocket Connection"
               >
-                <RotateCw className="w-3.5 h-3.5" />
+                <RotateCw className="w-3 h-3" />
               </button>
             )}
           </div>
 
           {/* Packets count */}
-          <div className="flex items-center gap-1.5 text-slate-400">
+          <div className="hidden sm:flex items-center gap-1.5 text-slate-400">
             <Activity className="w-3.5 h-3.5 text-cyan-400" />
             <span>PKTS: <strong className="text-white">{totalPackets.toLocaleString()}</strong></span>
           </div>
@@ -167,6 +197,24 @@ export const App: React.FC = () => {
           </div>
         </div>
       </header>
+
+      {/* Standby Banner when connected to backend but AC has not driven yet */}
+      {isConnected && !isStreaming && !isDemoMode && (
+        <div className="bg-cyan-950/40 border border-cyan-800/60 text-cyan-200 px-4 py-2.5 rounded-lg flex items-center justify-between text-xs font-mono">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping inline-block" />
+            <span>
+              <strong>PIPELINE CONNECTED:</strong> Listening on UDP 9996. Enter the cockpit and click <strong>Drive</strong> in Assetto Corsa to start telemetry streaming.
+            </span>
+          </div>
+          <button
+            onClick={() => setDemoMode(true)}
+            className="text-amber-300 hover:text-amber-200 underline font-bold"
+          >
+            Launch Demo Mode Instead
+          </button>
+        </div>
+      )}
 
       {/* Main Grid: Tachometer + Driver Inputs */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -242,6 +290,78 @@ export const App: React.FC = () => {
           </div>
         </div>
       </footer>
+
+      {/* InfluxDB Credentials Modal */}
+      {showInfluxModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-md w-full p-6 shadow-2xl relative font-chakra text-slate-100">
+            <button
+              onClick={() => setShowInfluxModal(false)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-white p-1 rounded-lg"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-lg bg-purple-500/10 border border-purple-500/30 flex items-center justify-center text-purple-400">
+                <Database className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-white tracking-wide">
+                  InfluxDB v2 Login
+                </h3>
+                <p className="text-xs text-slate-400 font-mono">
+                  Time-Series Database & Data Explorer
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-slate-950/80 rounded-lg p-4 border border-slate-800 font-mono text-xs space-y-2 mb-5">
+              <div className="flex justify-between items-center pb-1.5 border-b border-slate-800">
+                <span className="text-slate-500 flex items-center gap-1.5">
+                  <Key className="w-3.5 h-3.5 text-purple-400" /> USERNAME
+                </span>
+                <span className="text-purple-300 font-bold select-all">admin</span>
+              </div>
+
+              <div className="flex justify-between items-center pb-1.5 border-b border-slate-800">
+                <span className="text-slate-500 flex items-center gap-1.5">
+                  <Key className="w-3.5 h-3.5 text-purple-400" /> PASSWORD
+                </span>
+                <span className="text-amber-300 font-bold select-all">f1telemetryadmin123</span>
+              </div>
+
+              <div className="flex justify-between items-center pb-1.5 border-b border-slate-800">
+                <span className="text-slate-500">ORGANIZATION</span>
+                <span className="text-slate-200 select-all">motorsport</span>
+              </div>
+
+              <div className="flex justify-between items-center">
+                <span className="text-slate-500">BUCKET</span>
+                <span className="text-slate-200 select-all">telemetry</span>
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center gap-3">
+              <a
+                href="http://localhost:8086"
+                target="_blank"
+                rel="noreferrer"
+                className="flex-1 bg-purple-600 hover:bg-purple-500 text-white font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 text-xs transition-colors shadow-lg shadow-purple-600/30"
+              >
+                <span>OPEN INFLUXDB EXPLORER</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+              <button
+                onClick={() => setShowInfluxModal(false)}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-2.5 px-4 rounded-lg text-xs transition-colors"
+              >
+                CLOSE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

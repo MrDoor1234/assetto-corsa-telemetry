@@ -135,6 +135,11 @@ docker compose -f infrastructure/docker-compose.yml up --build
 * **Frontend Cockpit:** http://localhost:3000
 * **Backend API & Swagger Docs:** http://localhost:8000/docs
 * **InfluxDB Data Explorer:** http://localhost:8086
+  * **Username:** `admin`
+  * **Password:** `f1telemetryadmin123`
+  * **Organization:** `motorsport`
+  * **Bucket:** `telemetry`
+  * **API Token:** `supersecret-f1-telemetry-token`
 
 ---
 
