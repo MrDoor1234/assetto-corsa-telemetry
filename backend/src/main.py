@@ -11,7 +11,15 @@ Coordinates:
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+import os
+import sys
 import time
+
+# Ensure project root is in sys.path when running as a direct script
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from backend.src.config import settings
