@@ -25,7 +25,6 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
-      - "9996:9996/udp"
     environment:
       - HOST=0.0.0.0
       - PORT=8000

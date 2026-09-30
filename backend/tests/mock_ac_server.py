@@ -124,9 +124,9 @@ class MockAssettoCorsaServer:
         if len(data) >= 12:
             try:
                 ident, ver, op = struct.unpack(HANDSHAKE_FORMAT, data[:12])
-                if op == OperationId.SUBSCRIBE_UPDATE:
+                if op in (OperationId.HANDSHAKE, OperationId.SUBSCRIBE_UPDATE):
                     if addr not in self.subscribers:
-                        print(f"[MOCK AC] Client subscribed from {addr} (ident={ident}, ver={ver})")
+                        print(f"[MOCK AC] Client subscribed from {addr} (ident={ident}, ver={ver}, op={op})")
                         self.subscribers.add(addr)
                 elif op == OperationId.DISMISS:
                     if addr in self.subscribers:

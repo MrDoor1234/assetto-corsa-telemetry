@@ -13,6 +13,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ backend/
 
 EXPOSE 8000
-EXPOSE 9996/udp
 
 CMD ["uvicorn", "backend.src.main:app", "--host", "0.0.0.0", "--port", "8000"]

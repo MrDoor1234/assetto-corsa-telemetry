@@ -10,6 +10,7 @@ Handles:
 
 import asyncio
 import logging
+import socket
 import time
 from typing import Optional, Tuple
 from backend.src.config import settings
@@ -39,6 +40,11 @@ class TelemetryListenerProtocol(asyncio.DatagramProtocol):
         self.metrics["packets_received"] += 1
         self.metrics["bytes_received"] += len(data)
         self.metrics["last_packet_time"] = time.time()
+
+        # Handle Handshake acknowledgment packet from Assetto Corsa (~408 bytes)
+        if len(data) >= 400 and len(data) != RT_CAR_INFO_SIZE:
+            logger.info(f"Handshake response acknowledged by Assetto Corsa from {addr} ({len(data)} bytes).")
+            return
 
         if len(data) < RT_CAR_INFO_SIZE:
             self.metrics["dropped_short_packets"] += 1
@@ -86,6 +92,7 @@ class TelemetryListener:
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.protocol: Optional[TelemetryListenerProtocol] = None
         self.handshake_task: Optional[asyncio.Task] = None
+        self._target_ip: Optional[str] = None
 
         self.metrics = {
             "packets_received": 0,
@@ -98,6 +105,18 @@ class TelemetryListener:
             "handshakes_sent": 0,
         }
 
+    def _resolve_target_ip(self) -> str:
+        """Resolve hostname to IPv4 address to satisfy asyncio DatagramTransport requirements."""
+        if self._target_ip:
+            return self._target_ip
+        try:
+            self._target_ip = socket.gethostbyname(settings.ac_host)
+            logger.info(f"Resolved AC target '{settings.ac_host}' -> {self._target_ip}")
+            return self._target_ip
+        except Exception as e:
+            logger.warning(f"Could not resolve host '{settings.ac_host}': {e}. Using raw setting.")
+            return settings.ac_host
+
     async def start(self):
         """Bind local UDP socket and initiate heartbeat handshake loop."""
         self.is_running = True
@@ -108,21 +127,31 @@ class TelemetryListener:
             lambda: TelemetryListenerProtocol(self.queue, self.metrics, db_queue=self.db_queue),
             local_addr=("0.0.0.0", 0),
         )
-        logger.info(f"Telemetry listener started. Target AC server: {settings.ac_host}:{settings.ac_port}")
+        resolved_ip = self._resolve_target_ip()
+        logger.info(f"Telemetry listener started. Target AC server: {resolved_ip}:{settings.ac_port}")
         self.handshake_task = asyncio.create_task(self._handshake_heartbeat_loop())
 
     async def _handshake_heartbeat_loop(self):
         """Periodically send subscription packet to keep telemetry stream alive."""
-        handshake_packet = pack_handshake(identifier=1, version=1, operation_id=OperationId.SUBSCRIBE_UPDATE)
-        target_addr = (settings.ac_host, settings.ac_port)
+        # Both packets required by Assetto Corsa UDP protocol
+        handshake_packet = pack_handshake(identifier=1, version=1, operation_id=OperationId.HANDSHAKE)
+        subscribe_packet = pack_handshake(identifier=1, version=1, operation_id=OperationId.SUBSCRIBE_UPDATE)
 
         while self.is_running:
+            target_ip = self._resolve_target_ip()
+            target_addr = (target_ip, settings.ac_port)
+
             if self.transport and not self.transport.is_closing():
                 try:
+                    # 1. Initiate handshake
                     self.transport.sendto(handshake_packet, target_addr)
-                    self.metrics["handshakes_sent"] += 1
+                    # 2. Subscribe to continuous physics stream
+                    self.transport.sendto(subscribe_packet, target_addr)
+                    self.metrics["handshakes_sent"] += 2
                 except Exception as e:
                     logger.warning(f"Failed to send handshake to {target_addr}: {e}")
+                    # Clear cached IP to force re-resolution on next iteration
+                    self._target_ip = None
             await asyncio.sleep(settings.handshake_interval_sec)
 
     async def stop(self):
@@ -133,9 +162,9 @@ class TelemetryListener:
 
         if self.transport and not self.transport.is_closing():
             try:
-                # Send DISMISS packet
+                target_ip = self._resolve_target_ip()
                 dismiss_packet = pack_handshake(identifier=1, version=1, operation_id=OperationId.DISMISS)
-                self.transport.sendto(dismiss_packet, (settings.ac_host, settings.ac_port))
+                self.transport.sendto(dismiss_packet, (target_ip, settings.ac_port))
             except Exception:
                 pass
             self.transport.close()
